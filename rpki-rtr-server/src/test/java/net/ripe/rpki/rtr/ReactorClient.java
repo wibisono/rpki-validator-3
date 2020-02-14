@@ -25,9 +25,9 @@ public class ReactorClient {
                 TcpClient.create()
                         .wiretap(true)
                         .host("localhost")
-                        .port(8082)
+                        .port(8323)
                         .doOnConnected(conn->conn.addHandler(new PduCodec()))
-                        .handle((inboud, outbound) -> outbound.sendObject(resetQueryPdu))
+                        .handle((inboud, outbound) -> outbound.sendObject(resetQueryPdu).neverComplete())
                         .connectNow();
 
         connection.inbound().receiveObject().then().doOnNext(s-> System.out.println("Receiving = " + s)).subscribe();
