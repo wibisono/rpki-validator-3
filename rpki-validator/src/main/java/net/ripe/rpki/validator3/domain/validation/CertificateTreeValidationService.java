@@ -64,6 +64,7 @@ import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.jooq.lambda.tuple.Tuple2;
 import org.jooq.lambda.tuple.Tuple3;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.net.URI;
@@ -105,6 +106,8 @@ public class CertificateTreeValidationService {
     private final Storage storage;
     private final ValidatedRpkiObjects validatedRpkiObjects;
     private final TrustAnchorState trustAnchorState;
+    @Value("${rpki.validator.strict-validation:false}")
+    private Boolean strictValidation;
 
     @Autowired
     public CertificateTreeValidationService(RpkiObjects rpkiObjects,
@@ -331,16 +334,36 @@ public class CertificateTreeValidationService {
             }
             validatedObjects.add(manifestObject.get().key());
 
-            manifest.getFiles().entrySet()
-                .parallelStream()
-                .flatMap(entry -> getManifestEntry(manifestUri, entry))
-                .flatMap(tuple -> getCertificateRepositoryObjectValidationContext(trustAnchor, context, validatedObjects, crlUri, x509Crl, tuple))
-                .map(tuple -> {
-                    final ValidationResult vr = tuple.v2();
-                    validateCertificateAuthority(trustAnchor, registeredRepositories, tuple.v1(), vr, validatedObjects);
+            // Terminate early for any stream processing steps having any failure
+            Stream<Tuple3<URI, RpkiObject, ValidationResult>> manifestValidationStream = manifest.getFiles().entrySet()
+                    .parallelStream()
+                    .flatMap(entry -> getManifestEntry(manifestUri, entry));
+
+
+            if(strictValidation && manifestValidationStream.anyMatch(e -> e.v3.hasFailureForCurrentLocation())){
+                log.error("Failed to get manifest entry");
+                return;
+            }
+
+            Stream<Tuple2<CertificateRepositoryObjectValidationContext, ValidationResult>> contextValidationStream = manifestValidationStream
+                    .flatMap(uriObjectValidationResultTuple -> getCertificateRepositoryObjectValidationContext(trustAnchor, context, validatedObjects, crlUri, x509Crl, uriObjectValidationResultTuple));
+
+            if(strictValidation && contextValidationStream.anyMatch(e -> e.v2.hasFailureForCurrentLocation())){
+                log.error("Failed to get repo object validation context");
+                return;
+            }
+
+            contextValidationStream
+                .map(contextValidationResultTuple -> {
+                    final ValidationResult vr = contextValidationResultTuple.v2();
+                    validateCertificateAuthority(trustAnchor, registeredRepositories, contextValidationResultTuple.v1(), vr, validatedObjects);
                     return vr;
                 })
                 .forEachOrdered(temporary::addAll);
+
+            if(strictValidation && temporary.hasFailureForCurrentLocation()){
+                return;
+            }
         } catch (Exception e) {
             validationResult.error(ErrorCodes.UNHANDLED_EXCEPTION, e.toString(), ExceptionUtils.getStackTrace(e));
         } finally {
